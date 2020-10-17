@@ -1,77 +1,88 @@
 from flask import Flask, request
 from json import dumps, loads
 import requests
+import psycopg2
 import hashlib
 import jwt
 import os
+from datetime import datetime
+
+import auth
+
 
 app = Flask(__name__)
 
-data = {
-    'users': [
-        {
-            'email': 'sample@email.com',
-            'username': 'sampleusername',
-            'password_hash': 'ajiodnsiocniwoencaffwfsae',
-            'token': 'mfaopomasfmopcampmcpomcpoampo',
-            'follows': [111,222,33]
-        }
-    ]
-}
-
-def check_valid_credentials(username, email):
-    for user in data['users']:
-        if user['email'] == email or user['username'] == username:
-            return False
-    return True
-
-def generate_token(username):
-    return jwt.encode({'username': username}, os.environ.get("SECRET_TOKEN"), algorithm='HS256')
-
 @app.route('/register', methods=['POST'])
 def register():
+
+    # Get parameters
     email = request.form.get('email')
     username = request.form.get('username')
+    password = request.form.get('password')
 
-    if not check_valid_credentials(username, email):
+    # Generate hashed password
+    hash = hashlib.sha256(password.encode()).hexdigest()
+
+    # Connect to database
+    connection = psycopg2.connect(user="ethanhansen", password=os.environ.get("DATABASE_PASSWORD"), host="localhost", port="5432", database="twitterbrief")
+    cursor = connection.cursor()
+
+
+    if not auth.check_unique_credentials(username, email, cursor):
         return dumps({ "Error": "Credentials already exist!" }), 500
 
-    password = request.form.get('password')
-    hash = hashlib.sha256("mypassword".encode()).hexdigest()
-
-    payload = {'screen_name': username}
-    token = os.environ.get("TWITTER_BEARER_TOKEN")
-    auth = {'Authorization': token}
-    response = requests.get('https://api.twitter.com/1.1/friends/ids.json', params=payload, headers=auth)
+    # Get followed user
+    response = auth.get_followed_twitter_accounts(username)
 
     if response.status_code != 200:
         print(response.json())
         return dumps({ "Error": "Invalid Twitter Account" }), 500
 
-    follows = response.json()
-
-    data['users'].append({
-        'email': email,
-        'username': username,
-        'password_hash': hash,
-        'follows': follows['ids']
-    })
-    return generate_token(username)
-
-
     
+    # Add user to database
+    auth.register_user(username, email, hash, cursor)
+
+    follows = response.json()
+    
+    # Add followed accounts
+    auth.add_accounts(follows['ids'], cursor)
+
+    auth.populate_followed_users(username, follows['ids'], cursor)
+
+    # Close database connection
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    # Return token
+    return auth.generate_token(username)
+    
+
+@app.route('/login', methods=['GET'])
+def login():
+    # Get parameters
+    username = request.args.get('username')
+    password = request.args.get('password')
+
+    # Generate hashed password
+    hash = hashlib.sha256("mypassword".encode()).hexdigest()
+
+    # Connect to database
+    connection = psycopg2.connect(user="ethanhansen", password=os.environ.get("DATABASE_PASSWORD"), host="localhost", port="5432", database="twitterbrief")
+    cursor = connection.cursor()
+
+    findUserQuery = "select username, password from users where username = '{0}'".format(username)
+    cursor.execute(findUserQuery)
+    user = cursor.fetchone()
+
+    if user[1] != hash:
+       return {'Error': 'invalid credentials'}, 401
+
+    return auth.generate_token(username)
+
+
+
 
 if __name__ == '__main__':
     app.run(port=5000)
-
-
-'''
-Sample Fetch Request
-  const getUsers = () => {
-    const url = '/get_users?screen_name=' + 'ethoshansen'
-    fetch(url, {
-      method: 'GET',
-      mode: 'cors'
-    })
-  }
-'''
+    
